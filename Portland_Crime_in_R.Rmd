@@ -1,0 +1,228 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+Portland Crime Analysis in R
+============================
+
+Based on the excellent blog entry at - https://hautahi.com/rmaps.
+
+``` {r}
+library(rgdal)
+library(rgeos)
+```
+
+### Open shapefiles
+
+* __dsn__- specifies the directory the shapefiles are in
+* __layer__ - specifies the name of the shapefile to open
+
+``` {r}
+port <- readOGR(dsn = "data", layer = "Police_Districts_Portland")
+crime <- readOGR(dsn = "data", layer = "NIJ_Nov2016_Crime")
+```
+
+### Plot some Layers
+
+* __par__ - used to specify 1 row, 2 columns. Plots will start in the 1st cell.
+* __plot__ - command to plot the layer. Title passed in a part of command.  _cex_ used to specify text weight
+
+``` {r data_plot, fig.width=20, fig.height=10}
+par(mfrow=c(1,2), mar=c(1,1,1.2,1))
+plot(port); title(main = list("Portland Police Districts (Polygon Object)", cex=1.8))
+plot(crime); title(main = list("November 2016 Crime Reports (Points Object)", cex=1.8))
+```
+
+### View some info on the loaded data
+
+* __class__ - standard R command but in this case tells us what type of dataframe we have
+* __summary__ - command is roughly equivalent to using _ogrinfo_
+
+Incidentally, projections in __sp__ appear to be defined using standard proj4 strings.  In MazamaSpatialUtils, they are specified manually uing the proj4 string:
+
+```
+SPDF@proj4string <- sp::CRS("+proj=longlat +ellps=GRS80 +datum=NAD83 +no_defs")
+```
+
+However, it is is equally easy to specify a projection by using an EPSG code:
+
+```
+epsg_4326 <- sp::CRS("+init=epsg:4326")
+
+# Yields...
+CRS arguments:
+ +init=epsg:4326 +proj=longlat +datum=WGS84 +no_defs +ellps=WGS84
++towgs84=0,0,0 
+```
+
+``` {r}
+class(crime)
+summary(crime)
+```
+
+
+``` {r}
+summary(port)
+```
+
+### View bounding box of entire data layer
+
+* __bbox()__ - shows the MBR for the layer
+
+``` {r}
+bbox(crime)
+```
+
+### Coordinate Reference System Info.
+
+The projection info is contained in the "proj4string" slot.  If we extract it from the dataframe, we see that it is an object of class "SRS".  Looking at the  _proj_string_ gives us the full proj4 string.
+
+``` {r}
+slotNames(crime)
+# 'data' 'coords.nrs' 'coords' 'bbox' 'proj4string'
+
+proj_string <- crime@proj4string
+
+class(proj_string)
+# 'CRS'
+
+proj_string
+# CRS arguments:
+# +proj=lcc +lat_1=44.33333333333334 +lat_2=46 +lat_0=43.66666666666666
+# +lon_0=-120.5 +x_0=2500000 +y_0=0 +ellps=GRS80 +units=ft +no_defs 
+```
+
+### Looking at the Data
+
+Speaking of slots, if we want to have a look at the data itself, we grab the "data" slot.
+
+``` {r}
+crime_data <- crime@data
+head(crime_data)
+```
+
+``` {r}
+# Look at what types of crime category exist
+
+crime_idx <- as.factor(crime@data$CATEGORY)
+levels(crime_idx)
+```
+
+### Plot both data sets in the same map
+
+In the previous plotting examples, we showed each layer in their own frame, plotted side by side.  We did this by using the _par_ function to split out layout pane into 2 columns, ```par(mfrow=c(1,2))```.  This is a useful way to see how they differ from one another, but now it's more useful to see them together.  It's easy to do this by just plotting one layer on top of another.
+
+``` {r crime_over_districts, fig.width=20, fig.height=10}
+par( mfrow = c(1,1), mar=c(1,1,2,1))
+
+# Plot the district polygons first, then crime points on top. The extent of the plot window is 
+# set by the first layer, so if we use the points first, the top and left edges of the polygons
+# will be clipped.
+
+plot(port)
+plot(crime, col= "red", add = TRUE)
+plot(port, add = TRUE); title(main = list("Portland Police Districts and November 2016 Crimes", cex=1.8))
+```
+
+### Spatial Subsetting
+
+We can see from the map above that there are crime points that fall outside the police district boundaries.  These are problematic for the purpose of gathering statistics, so let's have a look at them.  
+
+Look at the docs for rgeos: https://cran.rstudio.com/web/packages/rgeos/rgeos.pdf
+
+Also look at spatial operation here - https://www.r-bloggers.com/clipping-spatial-data-in-r/ (shows clipping)
+
+Good discussion of "by_id" ramifications - http://www.nickeubank.com/wp-content/uploads/2015/10/RGIS2_MergingSpatialData_part2_GeometricManipulations.html
+
+University of Oregon examples (includes rasterizing points and regridding - http://geog.uoregon.edu/bartlein/courses/geog495/lec07.html#clippingtrimmingpoint-in-polygon-analyses
+
+
+``` {r}
+# Different ways to compute intersections
+
+length(crime)
+
+length(crime[port,])
+
+#length(raster::intersect(crime, port))
+
+#length(gIntersection(port, crime, byid = TRUE))
+
+``` {r}
+# We can use rgeos::gIntersection to get all of the points that intersect
+#     inside_crime <- gIntersection(port, crime, byid = TRUE)
+# but it is much, much faster to just use square-bracket subsetting.
+
+inside_crime <- crime[port,]
+```
+
+``` {r inside_crime, fig.width=20, fig.height=10}
+par( mfrow = c(1,1), mar=c(1,1,2,1))
+
+plot(port)
+plot(inside_crime, col = "red", add = TRUE)
+title(main = list("Crimes Inside Police Districts", cex=2))
+```
+
+### Selecting the points outside
+
+How do I select just the points which fall outside the Police Districts?  This is much more difficult with rgeos, as it does not work with a geometry collection.  In other words, it doesn't return a logical vector when used against multiple polygons.  However, it does work when you use it against a single polygon.
+
+``` {r district_dissolve, fig.width=20, fig.height=10}
+# Create a single polygon for gDisjoint to work agains.
+
+portland <- gUnaryUnion(port, id = NULL, checkValidity=NULL)
+plot(portland)
+
+# NOTE there appears to be bad topology in this police district shapefile
+```
+
+Now we can use the `gDisjoint` function to create a logical vector of what points are outside the dissolved polygon.
+
+``` {r}
+outside_crimes <- gDisjoint(crime, portland, byid = TRUE)
+tibble::glimpse(outside_crimes)
+```
+
+We convert the logical vector into an index using the `which` function and then subset using the index
+
+``` {r}
+# Create an index of all the "TRUE" outside crimes
+outside_crime_idx <- which(outside_crimes)
+
+# Subset the outside crimes from the full crime set using their index position
+my_points <- crime[outside_crime_idx,]
+
+# Check the length 
+length(my_points)
+```
+
+``` {r outside_points, fig.width=20, fig.height=10}
+
+par( mfrow = c(1,1), mar=c(1,1,2,1))
+
+plot(port, col = "lightgray")
+plot(my_points, col= "red", add = TRUE)
+title(main = list("Crimes Outside Police Districts", cex=2))
+
+# NOTE: Many of the outside crimes appear to actually be very close to a police district.
+# Explore whether we can do something with buffering to only exclude points which are more than
+# n meters away from a district
+```
+
+Always good to verify that the the counts of "inside" + "outside" equals the total count.
+
+``` {r}
+length(crime)
+length(inside_crime)
+length(my_points)
+
+length(crime) == length(inside_crime) + length(my_points)
+```
+
+What are the types of crimes in the "outside" data?
+
+``` {r}
+unique(my_points@data$CATEGORY)
+```
